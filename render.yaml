@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: dentorax-secure-vision-gateway
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+      - key: ENGINE_PRIMARY
+        value: gemini
+      - key: GEMINI_API_MODE
+        value: interactions
+      - key: GEMINI_MODEL
+        value: gemini-3.5-flash
+      - key: GEMINI_API_BASE_URL
+        value: https://generativelanguage.googleapis.com/v1beta
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: DENTORAX_ADMIN_TOKEN
+        sync: false
