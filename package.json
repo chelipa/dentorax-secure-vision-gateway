@@ -1,6 +1,6 @@
 {
   "name": "dentorax-secure-vision-gateway",
-  "version": "0.1.1",
+  "version": "0.1.1b",
   "private": true,
   "type": "module",
   "description": "Dentorax Secure Vision Gateway with JSON repair, parse retry, and schema guard baseline.",
@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js"
+    "check": "node --check server.js",
+    "prestart": "npm install --omit=dev --no-audit --no-fund"
   },
   "engines": {
     "node": ">=20"
