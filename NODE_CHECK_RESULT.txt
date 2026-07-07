@@ -1,4 +1,11 @@
+Dentorax Secure Vision Gateway v0.1.2 validation
 
-> dentorax-secure-vision-gateway@0.1.1 check
-> node --check server.js
+Commands run:
+- npm install --omit=dev --no-audit --no-fund
+- npm run check
+- local /health smoke test
 
+Results:
+- npm install: PASS
+- node --check server.js: PASS
+- local /health returned gatewayVersion 0.1.2 and promptProtocol 8.8.3H-v0.2

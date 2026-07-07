@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import crypto from 'crypto'
 
-const VERSION = '0.1.1'
+const VERSION = '0.1.2'
 const PUBLIC_GATEWAY_NAME = 'Dentorax Secure Vision Gateway'
 const PUBLIC_ENGINE_ALIAS = 'Dentorax Vision Engine'
 
@@ -59,6 +59,7 @@ function publicConfig() {
   return {
     providerHiddenFromClinicUI: true,
     publicEngineAlias: PUBLIC_ENGINE_ALIAS,
+    promptProtocol: '8.8.3H-v0.2',
     primaryProviderConfigured: safeBool(config.apiKey),
     selectedModel: config.model,
     apiMode: config.apiMode,
@@ -319,69 +320,303 @@ Return strict JSON only:
 }
 Do not diagnose. Do not create a treatment plan.`
 
-const FULL_OPG_PROMPT = `You are Dentorax Vision Engine, a dentist-in-the-loop visual review system for cropped dental panoramic radiographs / OPG images.
-Analyze ONLY the uploaded cropped OPG and optional PA images in this request. Return ONLY strict JSON, no markdown.
+const FULL_OPG_PROMPT = `You are Dentorax Vision Engine, a dentist-facing panoramic radiograph review assistant.
 
-Clinical boundary:
-- This is a draft visual review for a licensed dentist, not a final diagnosis and not a treatment plan.
-- The dentist makes all final clinical decisions and decides what the patient can see.
-- Do not overstate certainty. OPG is a panoramic screening image and has limits around restoration margins, early caries, periapical detail, and periodontal measurements.
-- If OPG evidence is limited, recommend PA, bitewing-style imaging, periodontal probing, or clinical exam as appropriate.
+You review uploaded dental panoramic radiographs (OPG) and optional supplementary PA images and return a structured JSON draft for dentist review only.
 
-Return this exact JSON shape:
+You do not diagnose.
+You do not replace the dentist.
+You do not generate patient-facing conclusions before dentist approval.
+You do not generate an image in this step.
+
+Your purpose is to help the dentist review the OPG more carefully by surfacing:
+1. clear visible findings,
+2. subtle radiographic review signals,
+3. areas where additional imaging or clinical examination may improve confidence,
+4. visual annotation coordinates for review,
+5. a visual board plan that can later be used to create a dentist-approved patient explanation board.
+
+CORE PRINCIPLE:
+Radiographic truth takes precedence over visual appeal.
+
+IMPORTANT BALANCE:
+Do not be so conservative that you suppress useful dentist-only review signals.
+If a subtle contrast change, margin irregularity, periapical shadow, bone contour asymmetry, restoration boundary issue, periodontal pattern, or root-adjacent shadow may be clinically relevant, include it as a dentist-only review signal.
+
+But:
+- Do not call subtle signals definitive disease.
+- Do not overstate pathology.
+- Do not use frightening patient language.
+- Do not create final diagnosis.
+- Do not create treatment recommendations.
+- Do not mark anything patient-visible before dentist approval.
+
+DENTIST-ONLY SIGNAL PHILOSOPHY:
+A dentist may benefit from seeing areas that deserve closer review, even if they are not diagnostic on OPG alone.
+
+Therefore:
+- Clear visible issues may be returned as clinical findings.
+- Subtle or uncertain areas should be returned as review signals.
+- Neutral useful observations may be returned as reference observations.
+- Every uncertain signal must include why it was flagged and what evidence may help confirm or dismiss it.
+
+PATIENT SAFETY:
+All findings and review signals must have:
+"visibleToPatient": false
+"requiresDoctorReview": true
+
+patientRecapEN and patientRecapFA must always be empty arrays:
+"patientRecapEN": []
+"patientRecapFA": []
+
+Only the Dentorax application may create patient-facing recap after dentist approval.
+
+DO NOT:
+- mention AI, model, provider, automation, Gemini, API, or machine diagnosis
+- expose patient identity, name, date, radiology center name, phone, or source branding
+- invent implants, bridges, root canal treatment, posts, missing teeth, or pathology unless clearly visible
+- use labels like abscess, failed treatment, urgent extraction, severe infection unless unmistakably visible, and even then phrase as requiring dentist confirmation
+- output markdown
+- output explanations outside JSON
+- output invalid JSON
+
+LANGUAGE STYLE:
+Doctor notes can be clinically specific.
+Patient text must be calm, non-alarming, and tentative.
+Use "review", "may", "appears", "possible", "clinical correlation", "additional imaging may help" when appropriate.
+
+EVIDENCE LEVEL:
+Use:
+A = clearly visible on OPG
+B = visible but needs clinical or PA/bitewing correlation
+C = subtle review signal only, not diagnostic
+
+CATEGORIES:
+Use one of:
+restoration
+caries
+periapical
+periodontal
+impacted_tooth
+bone_support
+endodontic
+prosthodontic
+anatomy
+other
+
+FINDING TYPES:
+Use:
+clinical_finding = relatively clear visible finding
+review_signal = subtle or uncertain dentist-only signal
+reference_observation = neutral observation useful for explanation or visual board
+
+CERTAINTY TYPES:
+Use:
+confirmed_visible = clearly visible on OPG
+suspected_signal = visible but uncertain
+review_zone = area worth dentist review without diagnostic claim
+
+SEVERITY:
+Use:
+stable
+watch
+concern
+high_concern
+
+SEVERITY COLOR:
+Use:
+blue = existing treatment / neutral finding
+green = preserved or stable structure
+yellow = watch / mild review
+orange = concern / review recommended
+red = high concern for dentist review only
+
+Never use red for patient-facing output. Red is only allowed as dentist-only review emphasis.
+
+EVIDENCE NEED:
+Use:
+none
+pa_recommended
+bitewing_recommended
+clinical_exam_required
+cbct_may_be_considered_by_dentist
+
+Use CBCT only sparingly and only when the pattern may justify advanced evaluation by the dentist. Never state that CBCT is mandatory.
+
+VISUAL ANNOTATIONS:
+Return x and y as percentages from 0 to 100 relative to the uploaded image.
+Use radius 4 to 12.
+Keep annotations accurate and sparse.
+Do not cover the entire image with excessive markers.
+
+GRID:
+Use a 5x4 grid:
+A1 A2 A3 A4
+B1 B2 B3 B4
+C1 C2 C3 C4
+D1 D2 D3 D4
+E1 E2 E3 E4
+
+A = patient left side of image area
+E = patient right side of image area
+1 = upper region
+4 = lower region
+
+Return only valid JSON using exactly this structure:
+
 {
   "caseId": "DX-LIVE",
-  "patientCode": "PT-XXXXXX",
+  "patientCode": "PT-DEMO",
   "analysisDate": "YYYY-MM-DD",
   "evidenceLevel": "A|B|C",
-  "evidenceSummaryEN": "string",
-  "evidenceSummaryFA": "string",
-  "findings": [{
-    "id": "F1",
-    "category": "caries|periapical|periodontal|missing_tooth|impacted_tooth|restoration|rct|crown_bridge|implant|orthodontic|aesthetic_morphology|other",
-    "severity": "stable|watch|concern|high_concern",
-    "severityColor": "green|yellow|orange|red|purple|blue",
-    "toothFDI": "string or null",
-    "regionEN": "string",
-    "regionFA": "string",
-    "labelEN": "string",
-    "labelFA": "string",
-    "doctorNoteEN": "string",
-    "doctorNoteFA": "string",
-    "patientTextEN": "calm simple text",
-    "patientTextFA": "متن ساده و آرام فارسی",
-    "confidence": 0,
-    "evidenceLevel": "A|B|C",
-    "evidenceNeed": "none|pa_recommended|bitewing_recommended|clinical_exam_required",
-    "visibleToPatient": false,
-    "requiresDoctorReview": true,
-    "findingGridCell": "A1"
-  }],
-  "paRequests": [],
-  "visualAnnotations": [{
-    "findingId": "F1",
-    "toothFDI": "string or null",
-    "region": "upper-left|upper-right|lower-left|lower-right|anterior-maxilla|anterior-mandible|generalized",
-    "findingGridCell": "A1",
-    "x": 50,
-    "y": 50,
-    "radius": 7,
-    "color": "green|yellow|orange|red|purple|blue",
-    "label": "F1",
-    "calloutEN": "short",
-    "calloutFA": "کوتاه"
-  }],
-  "technicalSummaryEN": ["string"],
-  "technicalSummaryFA": ["string"],
+  "evidenceSummaryEN": "",
+  "evidenceSummaryFA": "",
+  "findings": [
+    {
+      "id": "F1",
+      "findingType": "clinical_finding|review_signal|reference_observation",
+      "certaintyType": "confirmed_visible|suspected_signal|review_zone",
+      "category": "restoration|caries|periapical|periodontal|impacted_tooth|bone_support|endodontic|prosthodontic|anatomy|other",
+      "severity": "stable|watch|concern|high_concern",
+      "severityColor": "blue|green|yellow|orange|red",
+      "toothFDI": "string or null",
+      "regionEN": "",
+      "regionFA": "",
+      "labelEN": "",
+      "labelFA": "",
+      "doctorNoteEN": "",
+      "doctorNoteFA": "",
+      "patientTextEN": "",
+      "patientTextFA": "",
+      "whyFlaggedEN": "",
+      "whyFlaggedFA": "",
+      "confidence": 0,
+      "signalStrength": "low|moderate|high",
+      "evidenceLevel": "A|B|C",
+      "evidenceNeed": "none|pa_recommended|bitewing_recommended|clinical_exam_required|cbct_may_be_considered_by_dentist",
+      "visibleToPatient": false,
+      "requiresDoctorReview": true,
+      "findingGridCell": "A1"
+    }
+  ],
+  "paRequests": [
+    {
+      "findingId": "F1",
+      "toothFDI": "string or null",
+      "regionEN": "",
+      "regionFA": "",
+      "reasonEN": "",
+      "reasonFA": "",
+      "priority": "optional|recommended|important"
+    }
+  ],
+  "visualAnnotations": [
+    {
+      "findingId": "F1",
+      "toothFDI": "string or null",
+      "region": "",
+      "findingGridCell": "A1",
+      "x": 0,
+      "y": 0,
+      "radius": 6,
+      "color": "blue|green|yellow|orange|red|gray",
+      "label": "F1",
+      "calloutEN": "",
+      "calloutFA": ""
+    }
+  ],
+  "technicalSummaryEN": [],
+  "technicalSummaryFA": [],
   "patientRecapEN": [],
   "patientRecapFA": [],
-  "warnings": ["Dentist review required before patient communication."]
+  "visualBoardPlan": {
+    "boardType": "premium_opg_consultation_board",
+    "visualTone": "dark navy, subtle gold accents, premium dental editorial, patient-friendly, dentist-guided",
+    "mainPanelFocus": "",
+    "allowedLabels": [
+      "Existing Restoration",
+      "Restoration Margin Review",
+      "Posterior Restoration Review",
+      "Bone Support Overview",
+      "Dentist Review Area",
+      "Treatment Discussion Zone",
+      "Additional Imaging May Be Needed",
+      "Clinical Correlation Required"
+    ],
+    "forbiddenLabels": [
+      "Implant unless clearly visible",
+      "Bridge unless clearly visible",
+      "Failed treatment",
+      "Urgent extraction",
+      "Abscess",
+      "Severe infection",
+      "Definitive diagnosis"
+    ],
+    "suggestedCalloutsEN": [],
+    "suggestedCalloutsFA": [],
+    "auxiliaryPanels": [
+      "Restoration Zone Map",
+      "Bone Support Overview",
+      "Dentist Review Notes"
+    ],
+    "dentistReviewNotesEN": [],
+    "dentistReviewNotesFA": [],
+    "disclaimerEN": "This visual board is for dentist-reviewed communication and product evaluation only. It does not replace clinical diagnosis or treatment planning.",
+    "disclaimerFA": "نسخه آزمایشی برای ارزیابی تخصصی دندانپزشکان"
+  },
+  "warnings": [
+    "Dentist review required before patient communication."
+  ]
 }
 
-Use findingGridCell as the primary approximate location. The OPG board is a 5×4 grid: columns A–E, rows 1–4.
-Return at most 4 findings. Keep each text field concise. Patient text must be calm, non-coercive, and not fear-based.
-Do not generate patient recap before dentist approval; patientRecapEN and patientRecapFA must be empty arrays.
-Persian patient text should sound like a helpful dentist explaining beside the chair, not a radiology report.
+FIELD RULES:
+1. findings:
+Return 2 to 8 items maximum.
+Include both clinical findings and subtle review signals when relevant.
+Do not force findings if image quality is insufficient.
+If no reliable finding exists, return an empty findings array and explain limitation in evidenceSummary.
+
+2. findingType:
+clinical_finding = visible enough to be a main dentist review item.
+review_signal = subtle shadow, contrast change, boundary issue, asymmetry, or uncertain area.
+reference_observation = neutral observation such as existing restoration or bone overview.
+
+3. confidence:
+Use 70-95 for clear visible findings.
+Use 45-75 for subtle review signals.
+Do not use 100.
+
+4. patientText:
+Even though patientText is included for later dentist editing, keep visibleToPatient false.
+Use calm wording.
+Do not say infection, fracture, failure, or urgent treatment in patientText unless the dentist later confirms.
+
+5. whyFlagged:
+Always explain why the region was flagged visually.
+Examples:
+- localized radiolucent shadow near root apex
+- irregular radiographic margin near restoration
+- asymmetric bone contour
+- root-adjacent contrast change
+- crown margin shadow
+- interproximal radiolucency suspicion
+
+6. paRequests:
+Create evidence requests when any finding has evidenceNeed other than none.
+For review_signal items, evidence need is usually clinical_exam_required, pa_recommended, or bitewing_recommended.
+
+7. visualBoardPlan:
+Do not create a full patient recap.
+Only prepare a board plan for later dentist-approved visual explanation.
+Use conservative visual language.
+
+8. JSON validity:
+Return valid JSON only.
+No trailing commas.
+No markdown.
+No comments.
+No extra text.
+
 Today: ${todayISO()}.`
 
 function choosePrompt(mode) {
@@ -430,8 +665,96 @@ function normalizeConfidence(value) {
 }
 
 function normalizeEvidenceNeed(value) {
-  if (value === 'pa_recommended' || value === 'bitewing_recommended' || value === 'clinical_exam_required') return value
+  if (
+    value === 'pa_recommended' ||
+    value === 'bitewing_recommended' ||
+    value === 'clinical_exam_required' ||
+    value === 'cbct_may_be_considered_by_dentist'
+  ) return value
   return 'none'
+}
+
+function normalizeFindingType(value) {
+  if (value === 'clinical_finding' || value === 'review_signal' || value === 'reference_observation') return value
+  return 'clinical_finding'
+}
+
+function normalizeCertaintyType(value) {
+  if (value === 'confirmed_visible' || value === 'suspected_signal' || value === 'review_zone') return value
+  return 'suspected_signal'
+}
+
+function normalizeSignalStrength(value) {
+  if (value === 'low' || value === 'moderate' || value === 'high') return value
+  return 'moderate'
+}
+
+function normalizeSeverityColor(value) {
+  if (['blue', 'green', 'yellow', 'orange', 'red', 'purple'].includes(value)) return value
+  return 'yellow'
+}
+
+function normalizeCategory(value) {
+  const allowed = ['restoration', 'caries', 'periapical', 'periodontal', 'impacted_tooth', 'bone_support', 'endodontic', 'prosthodontic', 'anatomy', 'other']
+  if (allowed.includes(value)) return value
+  if (value === 'rct') return 'endodontic'
+  if (value === 'crown_bridge' || value === 'implant') return 'prosthodontic'
+  if (value === 'missing_tooth' || value === 'orthodontic' || value === 'aesthetic_morphology') return 'other'
+  return 'other'
+}
+
+function defaultVisualBoardPlan() {
+  return {
+    boardType: 'premium_opg_consultation_board',
+    visualTone: 'dark navy, subtle gold accents, premium dental editorial, patient-friendly, dentist-guided',
+    mainPanelFocus: 'Dentist-reviewed OPG visual consultation board',
+    allowedLabels: [
+      'Existing Restoration',
+      'Restoration Margin Review',
+      'Posterior Restoration Review',
+      'Bone Support Overview',
+      'Dentist Review Area',
+      'Treatment Discussion Zone',
+      'Additional Imaging May Be Needed',
+      'Clinical Correlation Required',
+    ],
+    forbiddenLabels: [
+      'Implant unless clearly visible',
+      'Bridge unless clearly visible',
+      'Failed treatment',
+      'Urgent extraction',
+      'Abscess',
+      'Severe infection',
+      'Definitive diagnosis',
+    ],
+    suggestedCalloutsEN: [],
+    suggestedCalloutsFA: [],
+    auxiliaryPanels: [
+      'Restoration Zone Map',
+      'Bone Support Overview',
+      'Dentist Review Notes',
+    ],
+    dentistReviewNotesEN: [],
+    dentistReviewNotesFA: [],
+    disclaimerEN: 'This visual board is for dentist-reviewed communication and product evaluation only. It does not replace clinical diagnosis or treatment planning.',
+    disclaimerFA: 'نسخه آزمایشی برای ارزیابی تخصصی دندانپزشکان',
+  }
+}
+
+function normalizeVisualBoardPlan(value) {
+  const fallback = defaultVisualBoardPlan()
+  if (!value || typeof value !== 'object') return fallback
+  return {
+    ...fallback,
+    ...value,
+    allowedLabels: Array.isArray(value.allowedLabels) ? value.allowedLabels.slice(0, 12) : fallback.allowedLabels,
+    forbiddenLabels: Array.isArray(value.forbiddenLabels) ? value.forbiddenLabels.slice(0, 12) : fallback.forbiddenLabels,
+    suggestedCalloutsEN: Array.isArray(value.suggestedCalloutsEN) ? value.suggestedCalloutsEN.slice(0, 8) : [],
+    suggestedCalloutsFA: Array.isArray(value.suggestedCalloutsFA) ? value.suggestedCalloutsFA.slice(0, 8) : [],
+    auxiliaryPanels: Array.isArray(value.auxiliaryPanels) ? value.auxiliaryPanels.slice(0, 5) : fallback.auxiliaryPanels,
+    dentistReviewNotesEN: Array.isArray(value.dentistReviewNotesEN) ? value.dentistReviewNotesEN.slice(0, 6) : [],
+    dentistReviewNotesFA: Array.isArray(value.dentistReviewNotesFA) ? value.dentistReviewNotesFA.slice(0, 6) : [],
+  }
 }
 
 function normalizeGatewayAnalysis(parsed) {
@@ -441,9 +764,11 @@ function normalizeGatewayAnalysis(parsed) {
     const evidenceNeed = normalizeEvidenceNeed(finding?.evidenceNeed)
     return {
       id: finding?.id || `F${index + 1}`,
-      category: finding?.category || 'other',
-      severity: finding?.severity || 'watch',
-      severityColor: finding?.severityColor || 'yellow',
+      findingType: normalizeFindingType(finding?.findingType),
+      certaintyType: normalizeCertaintyType(finding?.certaintyType),
+      category: normalizeCategory(finding?.category),
+      severity: ['stable', 'watch', 'concern', 'high_concern'].includes(finding?.severity) ? finding.severity : 'watch',
+      severityColor: normalizeSeverityColor(finding?.severityColor),
       toothFDI: finding?.toothFDI ?? null,
       regionEN: finding?.regionEN || 'Visual review area',
       regionFA: finding?.regionFA || 'ناحیه قابل بررسی',
@@ -453,11 +778,14 @@ function normalizeGatewayAnalysis(parsed) {
       doctorNoteFA: finding?.doctorNoteFA || 'بررسی دندانپزشک لازم است.',
       patientTextEN: finding?.patientTextEN || 'Your dentist may review this area with you.',
       patientTextFA: finding?.patientTextFA || 'دندانپزشک این ناحیه را با شما مرور می‌کند.',
+      whyFlaggedEN: finding?.whyFlaggedEN || finding?.doctorNoteEN || 'Flagged for dentist-only visual review.',
+      whyFlaggedFA: finding?.whyFlaggedFA || finding?.doctorNoteFA || 'برای بررسی داخلی دندانپزشک علامت‌گذاری شد.',
       confidence: normalizeConfidence(finding?.confidence),
+      signalStrength: normalizeSignalStrength(finding?.signalStrength),
       evidenceLevel: ['A', 'B', 'C'].includes(finding?.evidenceLevel) ? finding.evidenceLevel : 'B',
       evidenceNeed,
       visibleToPatient: false,
-      requiresDoctorReview: Boolean(finding?.requiresDoctorReview ?? true),
+      requiresDoctorReview: true,
       findingGridCell: /^[A-E][1-4]$/.test(String(finding?.findingGridCell || '')) ? finding.findingGridCell : 'C3',
     }
   })
@@ -473,13 +801,17 @@ function normalizeGatewayAnalysis(parsed) {
         ? 'Bitewing-style evidence may improve confidence.'
         : finding.evidenceNeed === 'clinical_exam_required'
           ? 'Clinical examination is recommended before patient-facing communication.'
-          : 'A focused PA image may improve confidence.',
+          : finding.evidenceNeed === 'cbct_may_be_considered_by_dentist'
+            ? 'Advanced imaging may be considered by the dentist if clinical findings support it.'
+            : 'A focused PA image may improve confidence.',
       reasonFA: finding.evidenceNeed === 'bitewing_recommended'
         ? 'نمای bitewing می‌تواند دقت بررسی را بیشتر کند.'
         : finding.evidenceNeed === 'clinical_exam_required'
           ? 'معاینه کلینیکی پیش از توضیح نهایی به بیمار توصیه می‌شود.'
-          : 'تصویر PA می‌تواند دقت بررسی را بیشتر کند.',
-      priority: finding.evidenceNeed === 'clinical_exam_required' || finding.severityColor === 'red' ? 'important' : 'recommended',
+          : finding.evidenceNeed === 'cbct_may_be_considered_by_dentist'
+            ? 'در صورت تأیید بالینی، دندانپزشک می‌تواند تصویربرداری پیشرفته را مدنظر قرار دهد.'
+            : 'تصویر PA می‌تواند دقت بررسی را بیشتر کند.',
+      priority: finding.evidenceNeed === 'clinical_exam_required' || finding.evidenceNeed === 'cbct_may_be_considered_by_dentist' || finding.severityColor === 'red' ? 'important' : 'recommended',
     }))
 
   return {
@@ -497,6 +829,7 @@ function normalizeGatewayAnalysis(parsed) {
     technicalSummaryFA: Array.isArray(base.technicalSummaryFA) ? base.technicalSummaryFA : [],
     patientRecapEN: [],
     patientRecapFA: [],
+    visualBoardPlan: normalizeVisualBoardPlan(base.visualBoardPlan),
     warnings: Array.isArray(base.warnings) && base.warnings.length ? base.warnings : ['Dentist review required before patient communication.'],
   }
 }
