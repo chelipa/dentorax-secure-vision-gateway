@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import crypto from 'crypto'
 
-const VERSION = '0.1.0'
+const VERSION = '0.1.1'
 const PUBLIC_GATEWAY_NAME = 'Dentorax Secure Vision Gateway'
 const PUBLIC_ENGINE_ALIAS = 'Dentorax Vision Engine'
 
@@ -102,13 +102,117 @@ function validateImagePayload(image) {
   return { ok: true, estimatedBytes }
 }
 
-function extractJsonObject(text) {
-  const fenced = String(text || '').match(/```json\s*([\s\S]*?)```/i)
-  const raw = fenced?.[1] ?? String(text || '')
-  const first = raw.indexOf('{')
-  const last = raw.lastIndexOf('}')
+
+function extractJsonCandidate(text) {
+  const source = String(text || '').trim()
+  const fenced = source.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const raw = (fenced?.[1] ?? source).trim()
+  const firstObject = raw.indexOf('{')
+  const firstArray = raw.indexOf('[')
+  let first = -1
+  let closing = '}'
+  if (firstObject >= 0 && (firstArray === -1 || firstObject < firstArray)) {
+    first = firstObject
+    closing = '}'
+  } else if (firstArray >= 0) {
+    first = firstArray
+    closing = ']'
+  }
+  const last = raw.lastIndexOf(closing)
   if (first === -1 || last === -1 || last <= first) throw new Error('provider_response_did_not_contain_json')
-  return JSON.parse(raw.slice(first, last + 1))
+  return raw.slice(first, last + 1)
+}
+
+function normalizeJsonText(value) {
+  return String(value || '')
+    .replace(/^\uFEFF/, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, '$1')
+}
+
+function insertMissingCommasOutsideStrings(value) {
+  const input = String(value || '')
+  let output = ''
+  let inString = false
+  let escaped = false
+  let lastEndedValueAt = -1
+
+  function nextSignificant(index) {
+    for (let i = index; i < input.length; i += 1) {
+      if (!/\s/.test(input[i])) return input[i]
+    }
+    return ''
+  }
+
+  function shouldInsertCommaAfter(endChar, nextChar) {
+    if (!nextChar) return false
+    if (nextChar === ',' || nextChar === '}' || nextChar === ']' || nextChar === ':') return false
+    if (endChar === '"' && nextChar === ':') return false
+    return ['{', '[', '"', 't', 'f', 'n', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'].includes(nextChar)
+  }
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i]
+    output += char
+
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (char === '\\') {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+        lastEndedValueAt = i
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      continue
+    }
+
+    if (char === '}' || char === ']') {
+      lastEndedValueAt = i
+    }
+
+    if (lastEndedValueAt === i) {
+      const next = nextSignificant(i + 1)
+      if (shouldInsertCommaAfter(char, next)) output += ','
+    }
+  }
+
+  return output
+}
+
+function parseJsonWithRepair(text) {
+  const candidate = extractJsonCandidate(text)
+  const attempts = []
+  const variants = [
+    { name: 'direct', value: candidate },
+    { name: 'normalized', value: normalizeJsonText(candidate) },
+    { name: 'missing_comma_repair', value: insertMissingCommasOutsideStrings(normalizeJsonText(candidate)) },
+  ]
+
+  for (const variant of variants) {
+    try {
+      return { parsed: JSON.parse(variant.value), repair: variant.name, repaired: variant.name !== 'direct' }
+    } catch (error) {
+      attempts.push(`${variant.name}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const last = attempts[attempts.length - 1] || 'unknown_json_parse_error'
+  const err = new Error(`provider_json_parse_failed_after_repair: ${last}`)
+  err.attempts = attempts
+  err.rawPreview = candidate.length > 1200 ? `${candidate.slice(0, 1200)}\n…[truncated]` : candidate
+  throw err
+}
+
+function extractJsonObject(text) {
+  return parseJsonWithRepair(text).parsed
 }
 
 function extractInteractionText(result) {
@@ -249,7 +353,7 @@ Return this exact JSON shape:
     "confidence": 0,
     "evidenceLevel": "A|B|C",
     "evidenceNeed": "none|pa_recommended|bitewing_recommended|clinical_exam_required",
-    "visibleToPatient": true,
+    "visibleToPatient": false,
     "requiresDoctorReview": true,
     "findingGridCell": "A1"
   }],
@@ -269,13 +373,14 @@ Return this exact JSON shape:
   }],
   "technicalSummaryEN": ["string"],
   "technicalSummaryFA": ["string"],
-  "patientRecapEN": ["string"],
-  "patientRecapFA": ["string"],
+  "patientRecapEN": [],
+  "patientRecapFA": [],
   "warnings": ["Dentist review required before patient communication."]
 }
 
 Use findingGridCell as the primary approximate location. The OPG board is a 5×4 grid: columns A–E, rows 1–4.
-Patient text must be calm, non-coercive, and not fear-based.
+Return at most 4 findings. Keep each text field concise. Patient text must be calm, non-coercive, and not fear-based.
+Do not generate patient recap before dentist approval; patientRecapEN and patientRecapFA must be empty arrays.
 Persian patient text should sound like a helpful dentist explaining beside the chair, not a radiology report.
 Today: ${todayISO()}.`
 
@@ -288,11 +393,111 @@ function choosePrompt(mode) {
 async function runGatewayMode({ mode, image, paImages = [] }) {
   const prompt = choosePrompt(mode)
   const providerResult = await callGemini({ prompt, image, paImages })
-  const parsed = extractJsonObject(providerResult.text)
+  let parsedResult = null
+  try {
+    parsedResult = parseJsonWithRepair(providerResult.text)
+  } catch (firstError) {
+    if (mode !== 'full_opg_json') throw firstError
+    const retryPrompt = `${prompt}
+
+CRITICAL RETRY INSTRUCTION:
+Your previous response could not be parsed as JSON. Return a SHORTER valid JSON object only.
+Limit findings to maximum 3. Keep each text field short. No markdown. No comments. No trailing commas.
+Do not include patient-facing recap arrays; return patientRecapEN: [] and patientRecapFA: [].`
+    const retryResult = await callGemini({ prompt: retryPrompt, image, paImages })
+    const retryParsed = parseJsonWithRepair(retryResult.text)
+    return {
+      parsed: retryParsed.parsed,
+      providerApiModeUsed: retryResult.rawMode,
+      rawPreview: retryResult.text.length > 1600 ? `${retryResult.text.slice(0, 1600)}\n…[truncated]` : retryResult.text,
+      jsonRepair: { repaired: retryParsed.repaired, method: retryParsed.repair, retryUsed: true, firstError: firstError instanceof Error ? firstError.message : String(firstError) },
+    }
+  }
   return {
-    parsed,
+    parsed: parsedResult.parsed,
     providerApiModeUsed: providerResult.rawMode,
     rawPreview: providerResult.text.length > 1600 ? `${providerResult.text.slice(0, 1600)}\n…[truncated]` : providerResult.text,
+    jsonRepair: { repaired: parsedResult.repaired, method: parsedResult.repair, retryUsed: false },
+  }
+}
+
+
+function normalizeConfidence(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 70
+  if (n > 0 && n <= 1) return Math.round(n * 100)
+  return Math.round(Math.min(100, Math.max(0, n)))
+}
+
+function normalizeEvidenceNeed(value) {
+  if (value === 'pa_recommended' || value === 'bitewing_recommended' || value === 'clinical_exam_required') return value
+  return 'none'
+}
+
+function normalizeGatewayAnalysis(parsed) {
+  const base = parsed && typeof parsed === 'object' ? parsed : {}
+  const rawFindings = Array.isArray(base.findings) ? base.findings : []
+  const findings = rawFindings.slice(0, 6).map((finding, index) => {
+    const evidenceNeed = normalizeEvidenceNeed(finding?.evidenceNeed)
+    return {
+      id: finding?.id || `F${index + 1}`,
+      category: finding?.category || 'other',
+      severity: finding?.severity || 'watch',
+      severityColor: finding?.severityColor || 'yellow',
+      toothFDI: finding?.toothFDI ?? null,
+      regionEN: finding?.regionEN || 'Visual review area',
+      regionFA: finding?.regionFA || 'ناحیه قابل بررسی',
+      labelEN: finding?.labelEN || 'Visual review finding',
+      labelFA: finding?.labelFA || 'یافته قابل بررسی',
+      doctorNoteEN: finding?.doctorNoteEN || 'Dentist review required.',
+      doctorNoteFA: finding?.doctorNoteFA || 'بررسی دندانپزشک لازم است.',
+      patientTextEN: finding?.patientTextEN || 'Your dentist may review this area with you.',
+      patientTextFA: finding?.patientTextFA || 'دندانپزشک این ناحیه را با شما مرور می‌کند.',
+      confidence: normalizeConfidence(finding?.confidence),
+      evidenceLevel: ['A', 'B', 'C'].includes(finding?.evidenceLevel) ? finding.evidenceLevel : 'B',
+      evidenceNeed,
+      visibleToPatient: false,
+      requiresDoctorReview: Boolean(finding?.requiresDoctorReview ?? true),
+      findingGridCell: /^[A-E][1-4]$/.test(String(finding?.findingGridCell || '')) ? finding.findingGridCell : 'C3',
+    }
+  })
+
+  const paRequestsFromFindings = findings
+    .filter((finding) => finding.evidenceNeed !== 'none')
+    .map((finding) => ({
+      findingId: finding.id,
+      toothFDI: finding.toothFDI,
+      regionEN: finding.regionEN,
+      regionFA: finding.regionFA,
+      reasonEN: finding.evidenceNeed === 'bitewing_recommended'
+        ? 'Bitewing-style evidence may improve confidence.'
+        : finding.evidenceNeed === 'clinical_exam_required'
+          ? 'Clinical examination is recommended before patient-facing communication.'
+          : 'A focused PA image may improve confidence.',
+      reasonFA: finding.evidenceNeed === 'bitewing_recommended'
+        ? 'نمای bitewing می‌تواند دقت بررسی را بیشتر کند.'
+        : finding.evidenceNeed === 'clinical_exam_required'
+          ? 'معاینه کلینیکی پیش از توضیح نهایی به بیمار توصیه می‌شود.'
+          : 'تصویر PA می‌تواند دقت بررسی را بیشتر کند.',
+      priority: finding.evidenceNeed === 'clinical_exam_required' || finding.severityColor === 'red' ? 'important' : 'recommended',
+    }))
+
+  return {
+    ...base,
+    caseId: base.caseId || 'DX-LIVE',
+    patientCode: base.patientCode || 'PT-DEMO',
+    analysisDate: base.analysisDate || todayISO(),
+    evidenceLevel: ['A', 'B', 'C'].includes(base.evidenceLevel) ? base.evidenceLevel : 'B',
+    evidenceSummaryEN: base.evidenceSummaryEN || 'Dentorax visual review draft generated for dentist review.',
+    evidenceSummaryFA: base.evidenceSummaryFA || 'پیش‌نویس بررسی تصویری دنتوراکس برای بازبینی دندانپزشک تولید شد.',
+    findings,
+    paRequests: Array.isArray(base.paRequests) && base.paRequests.length ? base.paRequests : paRequestsFromFindings,
+    visualAnnotations: Array.isArray(base.visualAnnotations) ? base.visualAnnotations : [],
+    technicalSummaryEN: Array.isArray(base.technicalSummaryEN) ? base.technicalSummaryEN : [],
+    technicalSummaryFA: Array.isArray(base.technicalSummaryFA) ? base.technicalSummaryFA : [],
+    patientRecapEN: [],
+    patientRecapFA: [],
+    warnings: Array.isArray(base.warnings) && base.warnings.length ? base.warnings : ['Dentist review required before patient communication.'],
   }
 }
 
@@ -368,6 +573,7 @@ app.post('/engine/ping', async (req, res) => {
       publicEngineAlias: PUBLIC_ENGINE_ALIAS,
       apiMode: result.providerApiModeUsed,
       modelAlias: 'DX-Vision Primary',
+      jsonRepair: result.jsonRepair || null,
       requestDurationMs: Date.now() - started,
       parsed: result.parsed,
       rawPreview: result.rawPreview,
@@ -408,7 +614,7 @@ app.post('/analyze-opg', async (req, res) => {
 
     const result = await runGatewayMode({ mode: 'full_opg_json', image, paImages })
     send(res, 200, {
-      ...result.parsed,
+      ...normalizeGatewayAnalysis(result.parsed),
       ok: true,
       engineStatus: 'engine_active',
       source: 'secure_gateway',
@@ -420,6 +626,7 @@ app.post('/analyze-opg', async (req, res) => {
         publicEngineAlias: PUBLIC_ENGINE_ALIAS,
         apiMode: result.providerApiModeUsed,
         providerHiddenFromClinicUI: true,
+        jsonRepair: result.jsonRepair || null,
         cropMeta,
       },
     })

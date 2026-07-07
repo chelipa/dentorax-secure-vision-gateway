@@ -1,1 +1,4 @@
-node --check passed
+
+> dentorax-secure-vision-gateway@0.1.1 check
+> node --check server.js
+

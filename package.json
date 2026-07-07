@@ -1,9 +1,9 @@
 {
   "name": "dentorax-secure-vision-gateway",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
-  "description": "Compliance-aware, provider-hidden, foreign-hosted Dentorax OPG Vision Gateway baseline.",
+  "description": "Dentorax Secure Vision Gateway with JSON repair, parse retry, and schema guard baseline.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
